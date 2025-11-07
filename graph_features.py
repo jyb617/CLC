@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch_scatter import scatter_mean, scatter_add
 import numpy as np
 from typing import Dict, Tuple, Optional
+from tqdm import tqdm
 
 
 class GraphFeatureGenerator(nn.Module):
@@ -30,8 +31,8 @@ class GraphFeatureGenerator(nn.Module):
         # 构建用户-用户共现矩阵（基于共同购买的物品）
         self.user_user_edges = self._build_user_cooccurrence_graph(user_item_dict)
 
-        print(f"图构建完成: {self.edge_index_ui.size(1)} 条用户-物品边, "
-              f"{self.user_user_edges.size(1)} 条用户-用户边")
+        print(f"\n  ✓ 图构建完成: {self.edge_index_ui.size(1):,} 条用户-物品边, "
+              f"{self.user_user_edges.size(1):,} 条用户-用户边")
 
     def _build_bipartite_graph(self, user_item_dict: Dict) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -44,7 +45,8 @@ class GraphFeatureGenerator(nn.Module):
         user_list = []
         item_list = []
 
-        for user, items in user_item_dict.items():
+        print("  [1/3] 构建用户-物品二部图...")
+        for user, items in tqdm(user_item_dict.items(), desc="    处理用户", ncols=80):
             user_list.extend([user] * len(items))
             item_list.extend(items)
 
@@ -69,16 +71,18 @@ class GraphFeatureGenerator(nn.Module):
             edge_index: [2, num_edges] 用户-用户边
         """
         # 构建物品->用户的倒排索引
+        print("  [2/3] 构建物品-用户倒排索引...")
         item_users_dict = {}
-        for user, items in user_item_dict.items():
+        for user, items in tqdm(user_item_dict.items(), desc="    索引构建", ncols=80):
             for item in items:
                 if item not in item_users_dict:
                     item_users_dict[item] = []
                 item_users_dict[item].append(user)
 
         # 计算用户-用户共现
+        print("  [3/3] 计算用户共现关系...")
         user_cooccur = {}
-        for item, users in item_users_dict.items():
+        for item, users in tqdm(item_users_dict.items(), desc="    共现计算", ncols=80):
             # 对于每个物品，其购买用户之间两两连接
             for i, u1 in enumerate(users):
                 for u2 in users[i+1:]:
@@ -270,8 +274,9 @@ def build_graph_features(train_data: np.ndarray, num_user: int, num_item: int,
         graph_generator: 图特征生成器
     """
     # 构建用户-物品字典
+    print("  [0/3] 构建用户-物品字典...")
     user_item_dict = {}
-    for user, item in train_data:
+    for user, item in tqdm(train_data, desc="    处理交互", ncols=80):
         user = int(user)
         item = int(item)
         if user not in user_item_dict:

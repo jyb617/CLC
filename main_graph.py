@@ -114,12 +114,16 @@ if __name__ == '__main__':
     print('Data has been loaded.')
 
     ##########################################################################
+    print('\n' + '='*80)
     print('Building graph features ...')
+    print('='*80)
 
     # 构建图特征生成器
     graph_generator = build_graph_features(train_data, num_user, num_item, device)
 
-    print('Graph features built.')
+    print('='*80)
+    print('Graph features built successfully!')
+    print('='*80 + '\n')
 
     ##########################################################################
     print('Initializing model ...')
