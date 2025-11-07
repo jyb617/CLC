@@ -96,6 +96,10 @@ class CLCRec_Graph(torch.nn.Module):
 
     def encoder(self, mask=None):
         """将多模态内容特征编码为统一的嵌入表示"""
+        # 如果没有任何特征，返回零特征
+        if self.dim_feat == 0:
+            return torch.zeros(self.num_item, self.dim_E).cuda()
+
         feature = torch.tensor([]).cuda()
 
         if self.v_feat is not None:
