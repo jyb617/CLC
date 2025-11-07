@@ -223,20 +223,32 @@ class GraphFeatureGenerator(nn.Module):
             item_embedding: [num_item, dim] 物品嵌入
 
         Returns:
-            user_neighbor_feat: [num_user, dim] 用户邻居物品特征聚合
-            user_cooccur_feat: [num_user, dim] 用户共现特征聚合
+            view1: [num_user, dim] 第一个视图
+            view2: [num_user, dim] 第二个视图
+
+        Fast mode (enable_user_cooccurrence=False):
+            view1 = user ID embedding
+            view2 = user neighbor features (aggregated item features)
+
+        Full mode (enable_user_cooccurrence=True):
+            view1 = user neighbor features
+            view2 = user co-occurrence features (two-stage aggregation)
         """
         # 用户邻居特征（直接购买的物品）
         user_neighbor_feat = self.aggregate_neighbor_features(
             user_embedding, item_embedding, aggr='mean'
         )
 
-        # 用户共现特征（通过共同物品连接的用户）
-        user_cooccur_feat = self.aggregate_cooccurrence_features(
-            user_embedding, item_embedding, aggr='mean'
-        )
-
-        return user_neighbor_feat, user_cooccur_feat
+        if self.enable_user_cooccurrence:
+            # 完整模式：使用两阶段聚合作为第二个视图
+            user_cooccur_feat = self.aggregate_cooccurrence_features(
+                user_embedding, item_embedding, aggr='mean'
+            )
+            return user_neighbor_feat, user_cooccur_feat
+        else:
+            # 快速模式：使用ID嵌入作为第一个视图，邻居特征作为第二个视图
+            # 这样可以形成有意义的对比学习，让ID嵌入和结构特征对齐
+            return user_embedding, user_neighbor_feat
 
 
 class GraphContrastiveLoss(nn.Module):

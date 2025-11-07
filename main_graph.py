@@ -42,12 +42,12 @@ def init():
     parser.add_argument('--step', type=int, default=2000, help='Evaluation step.')
 
     # 图对比学习参数
-    parser.add_argument('--graph_lambda', type=float, default=0.1, help='Graph contrastive loss weight.')
-    parser.add_argument('--graph_temp', type=float, default=0.2, help='Graph contrastive temperature.')
+    parser.add_argument('--graph_lambda', type=float, default=0.2, help='Graph contrastive loss weight (default 0.2, higher = more graph influence).')
+    parser.add_argument('--graph_temp', type=float, default=0.2, help='Graph contrastive temperature (default 0.2, lower = stricter contrast).')
     parser.add_argument('--max_users_per_item', type=int, default=100,
                        help='Max users per item for co-occurrence calculation (avoid computation explosion).')
     parser.add_argument('--enable_user_cooccurrence', default='False',
-                       help='Enable user co-occurrence graph (slow but may improve 1-2%). Set False for fast mode.')
+                       help='Enable user co-occurrence graph (slow but may improve 1-2%). False=fast mode (recommended).')
 
     parser.add_argument('--has_v', default='False', help='Has Visual Features.')
     parser.add_argument('--has_a', default='False', help='Has Acoustic Features.')
