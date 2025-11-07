@@ -46,6 +46,8 @@ def init():
     parser.add_argument('--graph_temp', type=float, default=0.2, help='Graph contrastive temperature.')
     parser.add_argument('--max_users_per_item', type=int, default=100,
                        help='Max users per item for co-occurrence calculation (avoid computation explosion).')
+    parser.add_argument('--enable_user_cooccurrence', default='False',
+                       help='Enable user co-occurrence graph (slow but may improve 1-2%). Set False for fast mode.')
 
     parser.add_argument('--has_v', default='False', help='Has Visual Features.')
     parser.add_argument('--has_a', default='False', help='Has Acoustic Features.')
@@ -93,6 +95,7 @@ if __name__ == '__main__':
     graph_lambda = args.graph_lambda
     graph_temp = args.graph_temp
     max_users_per_item = args.max_users_per_item
+    enable_user_cooccurrence = True if args.enable_user_cooccurrence == 'True' else False
     is_word = True if data_path == 'tiktok' else False
     writer = SummaryWriter()
 
@@ -123,7 +126,7 @@ if __name__ == '__main__':
 
     # 构建图特征生成器
     graph_generator = build_graph_features(
-        train_data, num_user, num_item, device, max_users_per_item
+        train_data, num_user, num_item, device, max_users_per_item, enable_user_cooccurrence
     )
 
     print('='*80)

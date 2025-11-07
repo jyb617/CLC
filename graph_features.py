@@ -21,23 +21,30 @@ class GraphFeatureGenerator(nn.Module):
 
     def __init__(self, num_user: int, num_item: int, user_item_dict: Dict,
                  device: torch.device = torch.device('cuda'),
-                 max_users_per_item: int = 100):
+                 max_users_per_item: int = 100,
+                 enable_user_cooccurrence: bool = True):
         super(GraphFeatureGenerator, self).__init__()
         self.num_user = num_user
         self.num_item = num_item
         self.device = device
         self.max_users_per_item = max_users_per_item
+        self.enable_user_cooccurrence = enable_user_cooccurrence
 
         # 构建用户-物品二部图的边索引
         self.edge_index_ui, self.edge_index_iu = self._build_bipartite_graph(user_item_dict)
 
-        # 构建用户-用户共现矩阵（基于共同购买的物品）
-        self.user_user_edges = self._build_user_cooccurrence_graph(
-            user_item_dict, max_users_per_item=max_users_per_item
-        )
-
-        print(f"\n  ✓ 图构建完成: {self.edge_index_ui.size(1):,} 条用户-物品边, "
-              f"{self.user_user_edges.size(1):,} 条用户-用户边")
+        # 构建用户-用户共现矩阵（基于共同购买的物品）- 可选
+        if enable_user_cooccurrence:
+            print("  [注意] 构建用户共现图（可能较慢）...")
+            self.user_user_edges = self._build_user_cooccurrence_graph(
+                user_item_dict, max_users_per_item=max_users_per_item
+            )
+            print(f"\n  ✓ 图构建完成: {self.edge_index_ui.size(1):,} 条用户-物品边, "
+                  f"{self.user_user_edges.size(1):,} 条用户-用户边")
+        else:
+            print("\n  ⚠️  用户共现图已禁用（快速模式）- 仅使用用户-物品邻居特征")
+            self.user_user_edges = torch.zeros((2, 0), dtype=torch.long, device=self.device)
+            print(f"  ✓ 图构建完成: {self.edge_index_ui.size(1):,} 条用户-物品边")
 
     def _build_bipartite_graph(self, user_item_dict: Dict) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -283,7 +290,8 @@ class GraphContrastiveLoss(nn.Module):
 
 def build_graph_features(train_data: np.ndarray, num_user: int, num_item: int,
                         device: torch.device = torch.device('cuda'),
-                        max_users_per_item: int = 100) -> GraphFeatureGenerator:
+                        max_users_per_item: int = 100,
+                        enable_user_cooccurrence: bool = True) -> GraphFeatureGenerator:
     """
     从训练数据构建图特征生成器
 
@@ -294,12 +302,18 @@ def build_graph_features(train_data: np.ndarray, num_user: int, num_item: int,
         device: 设备
         max_users_per_item: 每个物品最多考虑的用户数，用于避免热门物品计算爆炸
                            默认100。如果数据集很大或很稀疏，可以适当增大。
+        enable_user_cooccurrence: 是否启用用户共现图（禁用可大幅加速）
+                                 默认True。如果构建太慢，设为False。
 
     Returns:
         graph_generator: 图特征生成器
     """
     # 构建用户-物品字典
-    print("  [0/3] 构建用户-物品字典...")
+    if enable_user_cooccurrence:
+        print("  [0/3] 构建用户-物品字典...")
+    else:
+        print("  [0/1] 构建用户-物品字典（快速模式）...")
+
     user_item_dict = {}
     for user, item in tqdm(train_data, desc="    处理交互", ncols=80):
         user = int(user)
@@ -310,7 +324,7 @@ def build_graph_features(train_data: np.ndarray, num_user: int, num_item: int,
 
     # 创建图特征生成器
     graph_generator = GraphFeatureGenerator(
-        num_user, num_item, user_item_dict, device, max_users_per_item
+        num_user, num_item, user_item_dict, device, max_users_per_item, enable_user_cooccurrence
     )
 
     return graph_generator
