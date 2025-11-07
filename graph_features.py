@@ -5,6 +5,7 @@ from torch_scatter import scatter_mean, scatter_add
 import numpy as np
 from typing import Dict, Tuple, Optional
 from tqdm import tqdm
+import random
 
 
 class GraphFeatureGenerator(nn.Module):
@@ -19,17 +20,21 @@ class GraphFeatureGenerator(nn.Module):
     """
 
     def __init__(self, num_user: int, num_item: int, user_item_dict: Dict,
-                 device: torch.device = torch.device('cuda')):
+                 device: torch.device = torch.device('cuda'),
+                 max_users_per_item: int = 100):
         super(GraphFeatureGenerator, self).__init__()
         self.num_user = num_user
         self.num_item = num_item
         self.device = device
+        self.max_users_per_item = max_users_per_item
 
         # 构建用户-物品二部图的边索引
         self.edge_index_ui, self.edge_index_iu = self._build_bipartite_graph(user_item_dict)
 
         # 构建用户-用户共现矩阵（基于共同购买的物品）
-        self.user_user_edges = self._build_user_cooccurrence_graph(user_item_dict)
+        self.user_user_edges = self._build_user_cooccurrence_graph(
+            user_item_dict, max_users_per_item=max_users_per_item
+        )
 
         print(f"\n  ✓ 图构建完成: {self.edge_index_ui.size(1):,} 条用户-物品边, "
               f"{self.user_user_edges.size(1):,} 条用户-用户边")
@@ -59,13 +64,15 @@ class GraphFeatureGenerator(nn.Module):
         return edge_index_ui, edge_index_iu
 
     def _build_user_cooccurrence_graph(self, user_item_dict: Dict,
-                                       min_common_items: int = 2) -> torch.Tensor:
+                                       min_common_items: int = 2,
+                                       max_users_per_item: int = 100) -> torch.Tensor:
         """
         构建用户-用户共现图（基于共同购买的物品）
 
         Args:
             user_item_dict: 用户-物品字典
             min_common_items: 最少共同物品数量
+            max_users_per_item: 每个物品最多考虑的用户数（避免热门物品计算爆炸）
 
         Returns:
             edge_index: [2, num_edges] 用户-用户边
@@ -79,15 +86,30 @@ class GraphFeatureGenerator(nn.Module):
                     item_users_dict[item] = []
                 item_users_dict[item].append(user)
 
-        # 计算用户-用户共现
+        # 计算用户-用户共现（优化版：对热门物品采样）
         print("  [3/3] 计算用户共现关系...")
+        print(f"        最多考虑每个物品的 {max_users_per_item} 个用户（避免计算爆炸）")
+
         user_cooccur = {}
+        sampled_items = 0
+        total_pairs = 0
+
         for item, users in tqdm(item_users_dict.items(), desc="    共现计算", ncols=80):
+            # 如果用户数超过阈值，随机采样
+            if len(users) > max_users_per_item:
+                users = random.sample(users, max_users_per_item)
+                sampled_items += 1
+
             # 对于每个物品，其购买用户之间两两连接
             for i, u1 in enumerate(users):
                 for u2 in users[i+1:]:
                     key = (min(u1, u2), max(u1, u2))  # 确保边的唯一性
                     user_cooccur[key] = user_cooccur.get(key, 0) + 1
+                    total_pairs += 1
+
+        print(f"        已处理 {len(item_users_dict)} 个物品")
+        print(f"        其中 {sampled_items} 个热门物品被采样")
+        print(f"        生成 {total_pairs:,} 个候选用户对")
 
         # 过滤掉共同物品数量过少的边
         edges = [(u1, u2) for (u1, u2), count in user_cooccur.items()
@@ -260,7 +282,8 @@ class GraphContrastiveLoss(nn.Module):
 
 
 def build_graph_features(train_data: np.ndarray, num_user: int, num_item: int,
-                        device: torch.device = torch.device('cuda')) -> GraphFeatureGenerator:
+                        device: torch.device = torch.device('cuda'),
+                        max_users_per_item: int = 100) -> GraphFeatureGenerator:
     """
     从训练数据构建图特征生成器
 
@@ -269,6 +292,8 @@ def build_graph_features(train_data: np.ndarray, num_user: int, num_item: int,
         num_user: 用户数量
         num_item: 物品数量
         device: 设备
+        max_users_per_item: 每个物品最多考虑的用户数，用于避免热门物品计算爆炸
+                           默认100。如果数据集很大或很稀疏，可以适当增大。
 
     Returns:
         graph_generator: 图特征生成器
@@ -284,6 +309,8 @@ def build_graph_features(train_data: np.ndarray, num_user: int, num_item: int,
         user_item_dict[user].append(item)
 
     # 创建图特征生成器
-    graph_generator = GraphFeatureGenerator(num_user, num_item, user_item_dict, device)
+    graph_generator = GraphFeatureGenerator(
+        num_user, num_item, user_item_dict, device, max_users_per_item
+    )
 
     return graph_generator

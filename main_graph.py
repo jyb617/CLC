@@ -44,6 +44,8 @@ def init():
     # 图对比学习参数
     parser.add_argument('--graph_lambda', type=float, default=0.1, help='Graph contrastive loss weight.')
     parser.add_argument('--graph_temp', type=float, default=0.2, help='Graph contrastive temperature.')
+    parser.add_argument('--max_users_per_item', type=int, default=100,
+                       help='Max users per item for co-occurrence calculation (avoid computation explosion).')
 
     parser.add_argument('--has_v', default='False', help='Has Visual Features.')
     parser.add_argument('--has_a', default='False', help='Has Acoustic Features.')
@@ -90,6 +92,7 @@ if __name__ == '__main__':
     dim_E = args.dim_E
     graph_lambda = args.graph_lambda
     graph_temp = args.graph_temp
+    max_users_per_item = args.max_users_per_item
     is_word = True if data_path == 'tiktok' else False
     writer = SummaryWriter()
 
@@ -119,7 +122,9 @@ if __name__ == '__main__':
     print('='*80)
 
     # 构建图特征生成器
-    graph_generator = build_graph_features(train_data, num_user, num_item, device)
+    graph_generator = build_graph_features(
+        train_data, num_user, num_item, device, max_users_per_item
+    )
 
     print('='*80)
     print('Graph features built successfully!')
