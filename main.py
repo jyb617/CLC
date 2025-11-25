@@ -67,17 +67,14 @@ if __name__ == '__main__':
     save_file_name = args.save_file
 
     learning_rate = args.l_r
-    lr_lambda = args.lr_lambda
     reg_weight = args.reg_weight
     batch_size = args.batch_size
     num_workers = args.num_workers
     num_epoch = args.num_epoch
     num_neg = args.num_neg
-    num_sample = args.num_sample
     topK = args.topK
     prefix = args.prefix
     model_name = args.model_name
-    temp_value = args.temp_value
     step = args.step
     has_v = True if args.has_v == 'True' else False
     has_a = True if args.has_a == 'True' else False
