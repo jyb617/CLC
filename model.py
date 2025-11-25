@@ -84,19 +84,13 @@ class FeatureEncoder(nn.Module):
 
         if v_feat is not None:
             # Register as buffer to ensure it moves with the model
-            # Normalize on CPU first to avoid CUDA compatibility issues
-            v_feat_cpu = v_feat.cpu() if v_feat.is_cuda else v_feat
-            v_feat_normalized = F.normalize(v_feat_cpu, dim=1)
-            self.register_buffer('v_feat_norm', v_feat_normalized)
+            self.register_buffer('v_feat_norm', F.normalize(v_feat, dim=1))
             self.dim_feat += self.v_feat_norm.size(1)
         else:
             self.v_feat_norm = None
 
         if a_feat is not None:
-            # Normalize on CPU first to avoid CUDA compatibility issues
-            a_feat_cpu = a_feat.cpu() if a_feat.is_cuda else a_feat
-            a_feat_normalized = F.normalize(a_feat_cpu, dim=1)
-            self.register_buffer('a_feat_norm', a_feat_normalized)
+            self.register_buffer('a_feat_norm', F.normalize(a_feat, dim=1))
             self.dim_feat += self.a_feat_norm.size(1)
         else:
             self.a_feat_norm = None
@@ -110,10 +104,7 @@ class FeatureEncoder(nn.Module):
                 self.word_tensor = t_feat
                 self.dim_feat += 128
             else:
-                # Normalize on CPU first to avoid CUDA compatibility issues
-                t_feat_cpu = t_feat.cpu() if t_feat.is_cuda else t_feat
-                t_feat_normalized = F.normalize(t_feat_cpu, dim=1)
-                self.register_buffer('t_feat_norm', t_feat_normalized)
+                self.register_buffer('t_feat_norm', F.normalize(t_feat, dim=1))
                 self.dim_feat += self.t_feat_norm.size(1)
         else:
             self.t_feat_norm = None
