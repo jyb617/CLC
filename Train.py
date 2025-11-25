@@ -75,20 +75,40 @@ def train(epoch, length, dataloader, model, graph, optimizer, args):
         # 3a. Reuse View1 as main collaborative embeddings
         Z_collab = Z_view1
 
-        # 3b. Get content embeddings for items in batch
-        # Note: items_unique includes user+item offset, so we need to subtract num_user
-        items_unique_offset = items_unique - model.num_user
+        # 3b. Sample a subset of items for R-E loss to save memory
+        # Only use positive items (first column of items_bpr)
+        items_for_re = items_bpr[:, 0].unique()  # Only positive items
+
+        # Get content embeddings for items in batch
+        items_for_re_offset = items_for_re - model.num_user
         f_batch = model.feature_encoder()  # Get all content embeddings
-        f_batch = f_batch[items_unique_offset]  # Select batch items
+        f_batch = f_batch[items_for_re_offset]  # Select batch items
 
         # 3c. Get collaborative embeddings for items in batch
-        z_batch = Z_collab[items_unique]
+        z_batch = Z_collab[items_for_re]
 
         # 3d. Compute structural positive mask (Method 1)
-        # Cosine similarity between collaborative embeddings
-        sim_zz = F.cosine_similarity(z_batch.unsqueeze(1), z_batch.unsqueeze(0), dim=2)
-        pos_mask = (sim_zz > args.structural_threshold).float()
-        pos_mask.fill_diagonal_(1)  # Ensure (f_i, z_i) is always positive
+        # Use chunked computation to save memory
+        batch_size_re = z_batch.size(0)
+
+        if batch_size_re <= 512:
+            # Small enough, compute directly
+            sim_zz = F.cosine_similarity(z_batch.unsqueeze(1), z_batch.unsqueeze(0), dim=2)
+            pos_mask = (sim_zz > args.structural_threshold).float()
+            pos_mask.fill_diagonal_(1)
+        else:
+            # Too large, use chunked computation
+            chunk_size = 256
+            pos_mask = torch.zeros(batch_size_re, batch_size_re).cuda()
+            z_batch_norm = F.normalize(z_batch, dim=1)
+
+            for i in range(0, batch_size_re, chunk_size):
+                end_i = min(i + chunk_size, batch_size_re)
+                sim_chunk = torch.mm(z_batch_norm[i:end_i], z_batch_norm.t())
+                pos_mask[i:end_i] = (sim_chunk > args.structural_threshold).float()
+
+            # Ensure diagonal is 1
+            pos_mask.fill_diagonal_(1)
 
         # 3e. Compute R-E loss
         loss_re = args.lambda_re * calc_infonce_with_mask(
