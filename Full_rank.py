@@ -16,11 +16,8 @@ def full_ranking(epoch, model, graph, content_features, data, user_item_inter, m
         # 2. Get final collaborative embeddings
         final_collab_embeds = model.lightgcn.get_final_embeddings(all_embeds_list)
 
-        # 3. Get final content embeddings
-        if content_features is not None:
-            final_content_embeds = content_features
-        else:
-            final_content_embeds = model.encoder()
+        # 3. Get final content embeddings (must use encoder to get dim_E embeddings)
+        final_content_embeds = model.encoder()
 
         # 4. Build result tensor for evaluation
         # Users: use collaborative embeddings

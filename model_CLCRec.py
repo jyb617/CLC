@@ -234,15 +234,10 @@ class CLCRec(torch.nn.Module):
         # Use only positive items to save memory
         items_for_re = item_tensor[:, 0].unique()  # Only positive items
 
-        # Get content embeddings
-        if content_features is not None:
-            items_for_re_offset = items_for_re - self.num_user
-            f_batch = content_features[items_for_re_offset]
-        else:
-            # Fallback to encoder method if content_features not provided
-            full_features = self.encoder()
-            items_for_re_offset = items_for_re - self.num_user
-            f_batch = full_features[items_for_re_offset]
+        # Get content embeddings via encoder (must be encoded to dim_E for comparison with collaborative embeddings)
+        full_features = self.encoder()
+        items_for_re_offset = items_for_re - self.num_user
+        f_batch = full_features[items_for_re_offset]
 
         # Get collaborative embeddings
         z_batch = Z_collab[items_for_re]
