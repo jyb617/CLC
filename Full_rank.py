@@ -5,7 +5,7 @@ from torch.autograd import no_grad
 import numpy as np
 from Metric import rank, full_accuracy
 
-def full_ranking(epoch, model, graph, data, user_item_inter, mask_items, is_training, step, topk , prefix, writer=None):
+def full_ranking(epoch, model, graph, content_features, data, user_item_inter, mask_items, is_training, step, topk , prefix, writer=None):
     print(prefix+' start...')
     model.eval()
     with no_grad():
@@ -17,7 +17,10 @@ def full_ranking(epoch, model, graph, data, user_item_inter, mask_items, is_trai
         final_collab_embeds = model.lightgcn.get_final_embeddings(all_embeds_list)
 
         # 3. Get final content embeddings
-        final_content_embeds = model.feature_encoder()
+        if content_features is not None:
+            final_content_embeds = content_features
+        else:
+            final_content_embeds = model.encoder()
 
         # 4. Build result tensor for evaluation
         # Users: use collaborative embeddings

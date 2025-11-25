@@ -1,183 +1,72 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from tqdm import tqdm
-from utils import calc_infonce_loss_batch, calc_infonce_with_mask
 
-
-def train(epoch, length, dataloader, model, graph, optimizer, args):
+def train(epoch, length, dataloader, model, graph, content_features, optimizer, batch_size, writer):
     """
-    Multi-task training loop integrating GCL, R-E, and U-I losses.
+    Training loop for CLCRec with LightGCN and R-E loss.
 
     Args:
         epoch: Current epoch number
-        length: Total number of samples in dataset
-        dataloader: Training data loader (provides BPR batches)
-        model: GCL_CLCRec model
-        graph: Original sparse adjacency matrix
+        length: Total number of samples
+        dataloader: Training data loader
+        model: CLCRec model
+        graph: Normalized sparse adjacency matrix for LightGCN
+        content_features: Content feature tensor
         optimizer: Optimizer
-        args: Arguments containing hyperparameters
+        batch_size: Batch size for progress tracking
+        writer: TensorBoard writer (optional)
 
     Returns:
         loss: Final loss value
-        sum_mat: Placeholder for compatibility
+        dummy: Placeholder for compatibility (always 0.0)
     """
     model.train()
-    print('Now, GCL-CLCRec training start ...')
+    print('Now, LightGCN-CLCRec training start ...')
 
-    pbar = tqdm(total=length)
     sum_loss = 0.0
     sum_loss_ui = 0.0
     sum_loss_re = 0.0
-    sum_loss_gcl = 0.0
     sum_reg_loss = 0.0
     step = 0.0
+
+    pbar = tqdm(total=length)
+    num_pbar = 0
 
     for user_tensor, item_tensor in dataloader:
         optimizer.zero_grad()
 
-        # Original BPR batch: [batch_size, 1+num_neg]
-        users_bpr = user_tensor.cuda()  # Shape: [batch_size, 1+num_neg]
-        items_bpr = item_tensor.cuda()  # Shape: [batch_size, 1+num_neg]
-
-        # --- Step 1: Node Sampling ---
-        # Extract unique users and items from the batch
-        users_unique = users_bpr[:, 0].unique()  # Unique users in this batch
-        items_unique = items_bpr.view(-1).unique()  # All unique items (pos + neg)
-
-        # --- Step 2: GCL Loss (L_GCL) ---
-
-        # 2a. Graph augmentation
-        graph_aug1 = model.graph_augment(graph, args.edge_dropout_rate)
-        graph_aug2 = model.graph_augment(graph, args.edge_dropout_rate)
-
-        # 2b. GCL encoding (two forward passes)
-        all_emb_v1_list = model.lightgcn(graph_aug1)
-        all_emb_v2_list = model.lightgcn(graph_aug2)
-
-        # 2c. Layer combination (get final embeddings)
-        Z_view1 = model.lightgcn.get_final_embeddings(all_emb_v1_list)
-        Z_view2 = model.lightgcn.get_final_embeddings(all_emb_v2_list)
-
-        # 2d. Extract embeddings for current batch nodes
-        z1_u = Z_view1[users_unique]
-        z1_i = Z_view1[items_unique]
-        z2_u = Z_view2[users_unique]
-        z2_i = Z_view2[items_unique]
-
-        # 2e. Compute GCL loss
-        loss_gcl_u = calc_infonce_loss_batch(z1_u, z2_u, args.temperature_gcl)
-        loss_gcl_i = calc_infonce_loss_batch(z1_i, z2_i, args.temperature_gcl)
-        loss_gcl = args.lambda_gcl * (loss_gcl_u + loss_gcl_i)
-
-        # --- Step 3: Structured R-E Loss (L_RE - Method 1) ---
-
-        # 3a. Reuse View1 as main collaborative embeddings
-        Z_collab = Z_view1
-
-        # 3b. Sample a subset of items for R-E loss to save memory
-        # Only use positive items (first column of items_bpr)
-        items_for_re = items_bpr[:, 0].unique()  # Only positive items
-
-        # Get content embeddings for items in batch
-        items_for_re_offset = items_for_re - model.num_user
-        f_batch = model.feature_encoder()  # Get all content embeddings
-        f_batch = f_batch[items_for_re_offset]  # Select batch items
-
-        # 3c. Get collaborative embeddings for items in batch
-        z_batch = Z_collab[items_for_re]
-
-        # 3d. Compute structural positive mask (Method 1)
-        # Use chunked computation to save memory
-        batch_size_re = z_batch.size(0)
-
-        if batch_size_re <= 512:
-            # Small enough, compute directly
-            sim_zz = F.cosine_similarity(z_batch.unsqueeze(1), z_batch.unsqueeze(0), dim=2)
-            pos_mask = (sim_zz > args.structural_threshold).float()
-            pos_mask.fill_diagonal_(1)
-        else:
-            # Too large, use chunked computation
-            chunk_size = 256
-            pos_mask = torch.zeros(batch_size_re, batch_size_re).cuda()
-            z_batch_norm = F.normalize(z_batch, dim=1)
-
-            for i in range(0, batch_size_re, chunk_size):
-                end_i = min(i + chunk_size, batch_size_re)
-                sim_chunk = torch.mm(z_batch_norm[i:end_i], z_batch_norm.t())
-                pos_mask[i:end_i] = (sim_chunk > args.structural_threshold).float()
-
-            # Ensure diagonal is 1
-            pos_mask.fill_diagonal_(1)
-
-        # 3e. Compute R-E loss
-        loss_re = args.lambda_re * calc_infonce_with_mask(
-            f_batch, z_batch, pos_mask, args.temperature_re
+        # Compute multi-task loss
+        loss, loss_ui, loss_re, reg_loss = model.loss(
+            user_tensor.cuda(),
+            item_tensor.cuda(),
+            graph,
+            content_features
         )
-
-        # --- Step 4: U-I Recommendation Loss (L_UI) ---
-
-        # 4a. Extract user and item embeddings for BPR
-        # users_bpr shape: [batch_size, 1+num_neg] but all columns are same user
-        # items_bpr shape: [batch_size, 1+num_neg], first column is pos, rest are neg
-        batch_size = users_bpr.size(0)
-        num_neg = items_bpr.size(1) - 1
-
-        # Get unique user IDs for this batch (one per row)
-        u_ids = users_bpr[:, 0]  # Shape: [batch_size]
-        u_emb_bpr = Z_collab[u_ids]  # Shape: [batch_size, dim]
-
-        # Get all item embeddings (pos + neg)
-        i_ids = items_bpr  # Shape: [batch_size, 1+num_neg]
-        i_emb_bpr_all = Z_collab[i_ids]  # Shape: [batch_size, 1+num_neg, dim]
-
-        # 4b. Compute BPR scores
-        # Compute dot product: u_emb @ i_emb^T for each sample
-        scores = torch.bmm(
-            i_emb_bpr_all,  # [batch_size, 1+num_neg, dim]
-            u_emb_bpr.unsqueeze(-1)  # [batch_size, dim, 1]
-        ).squeeze(-1)  # [batch_size, 1+num_neg]
-
-        pos_scores = scores[:, 0]  # [batch_size]
-        neg_scores = scores[:, 1:]  # [batch_size, num_neg]
-
-        # InfoNCE-style loss (as in original CLCRec)
-        all_scores_ui = torch.cat([pos_scores.unsqueeze(1), neg_scores], dim=1)
-        loss_ui = -torch.log(
-            torch.exp(pos_scores / args.temp_value) /
-            torch.exp(all_scores_ui / args.temp_value).sum(1)
-        ).mean()
-
-        # --- Step 5: Total Loss and Backpropagation ---
-
-        # L2 regularization loss
-        reg_loss = args.reg_weight * model.lightgcn.embedding.weight.norm(2).pow(2) / float(batch_size)
-
-        # Total loss
-        loss = loss_ui + loss_re + loss_gcl + reg_loss
 
         # Backpropagation
         loss.backward()
         optimizer.step()
 
         # Accumulate losses
-        sum_loss += loss.item()
-        sum_loss_ui += loss_ui.item()
-        sum_loss_re += loss_re.item()
-        sum_loss_gcl += loss_gcl.item()
-        sum_reg_loss += reg_loss.item()
+        sum_loss += loss.cpu().item()
+        sum_loss_ui += loss_ui.cpu().item()
+        sum_loss_re += loss_re.cpu().item()
+        sum_reg_loss += reg_loss.cpu().item()
 
         pbar.update(batch_size)
+        num_pbar += batch_size
         step += 1.0
 
     pbar.close()
 
-    # Print epoch statistics
-    print(f'Epoch {epoch}: '
-          f'Total Loss={sum_loss/step:.4f}, '
-          f'UI Loss={sum_loss_ui/step:.4f}, '
-          f'RE Loss={sum_loss_re/step:.4f}, '
-          f'GCL Loss={sum_loss_gcl/step:.4f}, '
-          f'Reg Loss={sum_reg_loss/step:.4f}')
+    print('----------------- loss value:{}  UI_loss:{} RE_loss:{} reg_loss:{} --------------'
+        .format(sum_loss/step, sum_loss_ui/step, sum_loss_re/step, sum_reg_loss/step))
+
+    # if writer is not None:
+    #     writer.add_scalar('Loss/total', sum_loss/step, epoch)
+    #     writer.add_scalar('Loss/ui', sum_loss_ui/step, epoch)
+    #     writer.add_scalar('Loss/re', sum_loss_re/step, epoch)
+    #     writer.add_scalar('Loss/reg', sum_reg_loss/step, epoch)
 
     return loss, 0.0

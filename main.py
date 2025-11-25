@@ -3,10 +3,10 @@ import os
 import time
 import numpy as np
 import torch
+import torch.nn.functional as F
 import random
 from Dataset import TrainingDataset, data_load
 from model_CLCRec import CLCRec
-from model import GCL_CLCRec
 from torch.utils.data import DataLoader
 from Train import train
 from Full_rank import full_ranking
@@ -25,28 +25,23 @@ def init():#初始化参数
     parser.add_argument('--prefix', default='', help='Prefix of save_file.')
 
     parser.add_argument('--l_r', type=float, default=1e-3, help='Learning rate.')
-    parser.add_argument('--lr_lambda', type=float, default=1, help='Weight loss one.')
     parser.add_argument('--reg_weight', type=float, default=1e-1, help='Weight decay.')
-    parser.add_argument('--temp_value', type=float, default=1, help='Contrastive temp_value.')
     parser.add_argument('--model_name', default='SSL', help='Model Name.')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size.')
     parser.add_argument('--num_neg', type=int, default=512, help='Negative size.')
     parser.add_argument('--num_epoch', type=int, default=1000, help='Epoch number.')
     parser.add_argument('--num_workers', type=int, default=1, help='Workers number.')
-    parser.add_argument('--num_sample', type=float, default=0.5, help='Workers number.')
 
     parser.add_argument('--dim_E', type=int, default=64, help='Embedding dimension.')
     parser.add_argument('--topK', type=int, default=10, help='Workers number.')
     parser.add_argument('--step', type=int, default=2000, help='Workers number.')
 
-    # New hyperparameters for GCL and R-E losses
-    parser.add_argument('--lambda_re', type=float, default=0.1, help='Weight for R-E loss.')
-    parser.add_argument('--lambda_gcl', type=float, default=0.1, help='Weight for GCL loss.')
-    parser.add_argument('--temperature_re', type=float, default=0.1, help='Temperature for R-E loss.')
-    parser.add_argument('--temperature_gcl', type=float, default=0.1, help='Temperature for GCL loss.')
-    parser.add_argument('--structural_threshold', type=float, default=0.8, help='Cosine similarity threshold for structural positives in R-E loss.')
-    parser.add_argument('--edge_dropout_rate', type=float, default=0.1, help='Edge dropout rate for GCL graph augmentation.')
+    # New hyperparameters for LightGCN and R-E losses
     parser.add_argument('--num_layers', type=int, default=3, help='Number of LightGCN layers.')
+    parser.add_argument('--lambda_re', type=float, default=0.1, help='Weight for R-E loss.')
+    parser.add_argument('--temperature_re', type=float, default=0.1, help='Temperature for R-E loss.')
+    parser.add_argument('--temperature_ui', type=float, default=1.0, help='Temperature for U-I loss.')
+    parser.add_argument('--structural_threshold', type=float, default=0.8, help='Cosine similarity threshold for structural positives in R-E loss.')
 
     parser.add_argument('--has_v', default='False', help='Has Visual Features.')
     parser.add_argument('--has_a', default='False', help='Has Acoustic Features.')
@@ -111,6 +106,28 @@ if __name__ == '__main__':
 
     print('Data has been loaded.')
     ##########################################################################################################################################
+    # Build content features tensor (concatenate all modalities)
+    print('Building content features...')
+    content_feature_list = []
+
+    if has_a and a_feat is not None:
+        content_feature_list.append(F.normalize(a_feat, dim=1))
+
+    if has_t and t_feat is not None:
+        if is_word:
+            # For word-based features, keep as-is (will be processed in model)
+            content_features = None  # Will be handled by model
+        else:
+            content_feature_list.append(F.normalize(t_feat, dim=1))
+
+    # Concatenate all features
+    if content_feature_list:
+        content_features = torch.cat(content_feature_list, dim=1).cuda()
+    else:
+        content_features = None
+
+    print('Content features built.')
+    ##########################################################################################################################################
     # Build graph for LightGCN
     print('Building graph...')
     # Create edge list from train_data: (user, item) pairs
@@ -147,19 +164,25 @@ if __name__ == '__main__':
 
     print('Graph has been built.')
     ##########################################################################################################################################
-    # Create new GCL_CLCRec model
-    model = GCL_CLCRec(
+    # Create CLCRec model with LightGCN
+    model = CLCRec(
         num_user=num_user,
         num_item=num_item,
         num_warm_item=num_warm_item,
+        edge_index=train_data,
+        reg_weight=reg_weight,
+        dim_E=dim_E,
         v_feat=None,  # Visual features (not used in movielens)
         a_feat=a_feat,
         t_feat=t_feat,
-        dim_E=dim_E,
+        num_neg=num_neg,
+        is_word=is_word,
+        # New parameters
         num_layers=args.num_layers,
-        reg_weight=reg_weight,
-        temp_value=temp_value,
-        is_word=is_word
+        lambda_re=args.lambda_re,
+        temperature_re=args.temperature_re,
+        temperature_ui=args.temperature_ui,
+        structural_threshold=args.structural_threshold
     ).cuda()
     
     ##########################################################################################################################################
@@ -171,7 +194,7 @@ if __name__ == '__main__':
     num_decreases = 0 
     max_val_result = max_val_result_warm = max_val_result_cold = max_test_result = max_test_result_warm = max_test_result_cold = list()
     for epoch in range(num_epoch):
-        loss, mat = train(epoch, len(train_dataset), train_dataloader, model, graph, optimizer, args)
+        loss, mat = train(epoch, len(train_dataset), train_dataloader, model, graph, content_features, optimizer, batch_size, writer)
 
         if torch.isnan(loss):
             print(model.result)
@@ -180,18 +203,18 @@ if __name__ == '__main__':
             break
         torch.cuda.empty_cache()
 
-        # train_precision, train_recall, train_ndcg = full_ranking(epoch, model, graph, user_item_inter, user_item_inter, True, step, topK, 'Train', writer)
-        val_result = full_ranking(epoch, model, graph, val_data, user_item_train_dict, None, False, step, topK, 'Val/', writer)
+        # train_precision, train_recall, train_ndcg = full_ranking(epoch, model, graph, content_features, user_item_inter, user_item_inter, True, step, topK, 'Train', writer)
+        val_result = full_ranking(epoch, model, graph, content_features, val_data, user_item_train_dict, None, False, step, topK, 'Val/', writer)
 
-        val_result_warm = full_ranking(epoch, model, graph, val_warm_data, user_item_train_dict, cold_item, False, step, topK, 'Val/warm_', writer)
+        val_result_warm = full_ranking(epoch, model, graph, content_features, val_warm_data, user_item_train_dict, cold_item, False, step, topK, 'Val/warm_', writer)
 
-        val_result_cold = full_ranking(epoch, model, graph, val_cold_data, user_item_train_dict, warm_item, False, step, topK, 'Val/cold_', writer)
+        val_result_cold = full_ranking(epoch, model, graph, content_features, val_cold_data, user_item_train_dict, warm_item, False, step, topK, 'Val/cold_', writer)
 
-        test_result = full_ranking(epoch, model, graph, test_data, user_item_train_dict, None, False, step, topK, 'Test/', writer)
+        test_result = full_ranking(epoch, model, graph, content_features, test_data, user_item_train_dict, None, False, step, topK, 'Test/', writer)
 
-        test_result_warm = full_ranking(epoch, model, graph, test_warm_data, user_item_train_dict, cold_item, False, step, topK, 'Test/warm_', writer)
+        test_result_warm = full_ranking(epoch, model, graph, content_features, test_warm_data, user_item_train_dict, cold_item, False, step, topK, 'Test/warm_', writer)
 
-        test_result_cold = full_ranking(epoch, model, graph, test_cold_data, user_item_train_dict, warm_item, False, step, topK, 'Test/cold_', writer)
+        test_result_cold = full_ranking(epoch, model, graph, content_features, test_cold_data, user_item_train_dict, warm_item, False, step, topK, 'Test/cold_', writer)
 
 
         if val_result[1] > max_recall:#更新最佳参数

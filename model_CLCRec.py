@@ -7,22 +7,128 @@ import torch.nn.functional as F
 from torch_scatter import scatter
 
 ##########################################################################
+# LightGCN Encoder Module
+##########################################################################
+
+class LightGCN(nn.Module):
+    """
+    LightGCN encoder for collaborative filtering.
+    Replaces the original id_embedding with graph convolution.
+    """
+    def __init__(self, num_users, num_items, embed_dim, num_layers):
+        super(LightGCN, self).__init__()
+        self.num_users = num_users
+        self.num_items = num_items
+        self.embed_dim = embed_dim
+        self.num_layers = num_layers
+
+        # Learnable embedding matrix E^(0)
+        self.embedding = nn.Embedding(num_users + num_items, embed_dim)
+        nn.init.xavier_normal_(self.embedding.weight)
+
+    def forward(self, graph):
+        """
+        Perform K-layer graph convolution.
+
+        Args:
+            graph: Normalized sparse adjacency matrix
+
+        Returns:
+            List of embeddings [E^(0), E^(1), ..., E^(K)]
+        """
+        all_embeddings = [self.embedding.weight]
+        current_embeddings = self.embedding.weight
+
+        for layer in range(self.num_layers):
+            # LightGCN propagation: E^(k+1) = A @ E^(k)
+            current_embeddings = torch.sparse.mm(graph, current_embeddings)
+            all_embeddings.append(current_embeddings)
+
+        return all_embeddings
+
+    def get_final_embeddings(self, all_embeddings_list):
+        """
+        Layer combination using mean pooling.
+
+        Args:
+            all_embeddings_list: List of embeddings from all layers
+
+        Returns:
+            Final embedding E_final = mean([E^(0), E^(1), ..., E^(K)])
+        """
+        stacked_embeddings = torch.stack(all_embeddings_list, dim=0)
+        final_embeddings = torch.mean(stacked_embeddings, dim=0)
+        return final_embeddings
+
+
+##########################################################################
+# Structured R-E Loss Function
+##########################################################################
+
+def calc_infonce_with_mask(anchor, keys, positive_mask, temperature):
+    """
+    Calculate InfoNCE loss with custom positive mask.
+
+    Args:
+        anchor: Content embeddings [batch_size, dim]
+        keys: Collaborative embeddings [batch_size, dim]
+        positive_mask: Binary mask [batch_size, batch_size] indicating positive pairs
+        temperature: Temperature parameter
+
+    Returns:
+        InfoNCE loss (scalar)
+    """
+    # Normalize embeddings
+    anchor = F.normalize(anchor, p=2, dim=1)
+    keys = F.normalize(keys, p=2, dim=1)
+
+    # Compute similarity matrix
+    sim_matrix = torch.matmul(anchor, keys.T) / temperature
+
+    # Compute exp
+    exp_sim = torch.exp(sim_matrix)
+
+    # Numerator: sum over positives
+    numerator = (exp_sim * positive_mask).sum(dim=1)
+
+    # Denominator: sum over all
+    denominator = exp_sim.sum(dim=1)
+
+    # Avoid log(0)
+    numerator = torch.clamp(numerator, min=1e-9)
+    denominator = torch.clamp(denominator, min=1e-9)
+
+    # InfoNCE loss
+    loss = -torch.log(numerator / denominator).mean()
+    return loss
+
+
+##########################################################################
 
 class CLCRec(torch.nn.Module):
-    def __init__(self, num_user, num_item, num_warm_item, edge_index, reg_weight, dim_E, v_feat, a_feat, t_feat, temp_value, num_neg, lr_lambda, is_word, num_sample=0.5):
+    def __init__(self, num_user, num_item, num_warm_item, edge_index, reg_weight, dim_E, v_feat, a_feat, t_feat, num_neg, is_word,
+                 # New parameters for LightGCN and R-E loss
+                 num_layers=3, lambda_re=0.1, temperature_re=0.1, temperature_ui=1.0, structural_threshold=0.8):
         super(CLCRec, self).__init__()
         self.num_user = num_user
         self.num_item = num_item
         self.num_warm_item = num_warm_item
         self.num_neg = num_neg
-        self.lr_lambda = lr_lambda
         self.reg_weight = reg_weight
-        self.temp_value = temp_value
         self.dim_E = dim_E
         self.is_word = is_word
-        self.id_embedding = nn.Parameter(nn.init.xavier_normal_(torch.rand((num_user+num_item, dim_E))))#Parameter（会被优化器更新），创建了ID嵌入矩阵，是模型的核心参数之一，用于存储所有用户和物品的可学习嵌入向量。
+
+        # Store new parameters
+        self.num_layers = num_layers
+        self.lambda_re = lambda_re
+        self.temperature_re = temperature_re
+        self.temperature_ui = temperature_ui
+        self.structural_threshold = structural_threshold
+
+        # Replace id_embedding with LightGCN
+        self.lightgcn = LightGCN(num_user, num_item, dim_E, num_layers)
+
         self.dim_feat = 0
-        self.num_sample = num_sample
         
         if v_feat is not None:
             self.v_feat = F.normalize(v_feat, dim=1)#归一化
@@ -82,48 +188,107 @@ class CLCRec(torch.nn.Module):
         return feature
 
 
-    def loss_contrastive(self, tensor_anchor, tensor_all, temp_value):      
-        all_score = torch.exp(torch.sum(tensor_anchor*tensor_all, dim=1)/temp_value).view(-1, 1+self.num_neg)#view改变向量形状
-        all_score = all_score.view(-1, 1+self.num_neg)
-        pos_score = all_score[:, 0]
-        all_score = torch.sum(all_score, dim=1)
-        self.mat = (1-pos_score/all_score).mean()
-        contrastive_loss = (-torch.log(pos_score / all_score)).mean()
-        return contrastive_loss
+    def loss(self, user_tensor, item_tensor, graph, content_features):
+        """
+        Compute multi-task loss: L_UI + L_RE + L_reg
 
+        Args:
+            user_tensor: [batch_size, 1+num_neg] User IDs for BPR
+            item_tensor: [batch_size, 1+num_neg] Item IDs for BPR
+            graph: Normalized sparse adjacency matrix for LightGCN
+            content_features: Content feature tensor [num_items, feat_dim]
 
-    def forward(self, user_tensor, item_tensor):
-        pos_item_tensor = item_tensor[:, 0].unsqueeze(1)
-        pos_item_tensor = pos_item_tensor.repeat(1, 1+self.num_neg).view(-1, 1).squeeze()
-        
-        user_tensor = user_tensor.view(-1, 1).squeeze()
-        item_tensor = item_tensor.view(-1, 1).squeeze()
+        Returns:
+            total_loss: Combined loss
+            loss_ui: U-I recommendation loss
+            loss_re: R-E loss
+            reg_loss: Regularization loss
+        """
+        batch_size = user_tensor.size(0)
 
+        # --- 1. LightGCN Encoding ---
+        all_emb_list = self.lightgcn(graph)
+        Z_collab = self.lightgcn.get_final_embeddings(all_emb_list)
 
-        feature = self.encoder()
-        all_item_feat = feature[item_tensor-self.num_user]
+        # --- 2. L_UI (U-I Recommendation Loss) ---
+        # Extract embeddings for BPR
+        u_ids = user_tensor[:, 0]  # [batch_size]
+        u_emb_bpr = Z_collab[u_ids]  # [batch_size, dim]
+        i_emb_bpr_all = Z_collab[item_tensor]  # [batch_size, 1+num_neg, dim]
 
-        user_embedding = self.id_embedding[user_tensor]
-        pos_item_embedding = self.id_embedding[pos_item_tensor]
-        all_item_embedding = self.id_embedding[item_tensor]
-        
-        head_feat = F.normalize(all_item_feat, dim=1)
-        head_embed = F.normalize(pos_item_embedding, dim=1)
+        # Compute scores
+        scores = torch.bmm(
+            i_emb_bpr_all,  # [batch_size, 1+num_neg, dim]
+            u_emb_bpr.unsqueeze(-1)  # [batch_size, dim, 1]
+        ).squeeze(-1)  # [batch_size, 1+num_neg]
 
-        all_item_input = all_item_embedding.clone()
-        rand_index = torch.randint(all_item_embedding.size(0), (int(all_item_embedding.size(0)*self.num_sample), )).cuda()
-        all_item_input[rand_index] = all_item_feat[rand_index].clone()
+        scores = torch.exp(scores / self.temperature_ui)
 
-        self.contrastive_loss_1 = self.loss_contrastive(head_embed, head_feat, self.temp_value)
-        self.contrastive_loss_2 = self.loss_contrastive(user_embedding, all_item_input, self.temp_value)
+        pos_score = scores[:, 0]  # [batch_size]
+        all_score = scores.sum(dim=1)  # [batch_size]
 
-        reg_loss = ((torch.sqrt((user_embedding**2).sum(1))).mean()+(torch.sqrt((all_item_embedding**2).sum(1))).mean())/2
-        self.result = torch.cat((self.id_embedding[:self.num_user+self.num_warm_item], feature[self.num_warm_item:]), dim=0)
+        # InfoNCE-style loss
+        loss_ui = -torch.log(pos_score / all_score).mean()
 
-        return self.contrastive_loss_1*self.lr_lambda+(self.contrastive_loss_2)*(1-self.lr_lambda), reg_loss
-    
+        # --- 3. L_RE (Structured R-E Loss) ---
+        # Use only positive items to save memory
+        items_for_re = item_tensor[:, 0].unique()  # Only positive items
 
-    def loss(self, user_tensor, item_tensor):
-        contrastive_loss, reg_loss = self.forward(user_tensor, item_tensor)
-        reg_loss = self.reg_weight * reg_loss
-        return reg_loss+contrastive_loss, self.contrastive_loss_2+reg_loss, reg_loss
+        # Get content embeddings
+        if content_features is not None:
+            items_for_re_offset = items_for_re - self.num_user
+            f_batch = content_features[items_for_re_offset]
+        else:
+            # Fallback to encoder method if content_features not provided
+            full_features = self.encoder()
+            items_for_re_offset = items_for_re - self.num_user
+            f_batch = full_features[items_for_re_offset]
+
+        # Get collaborative embeddings
+        z_batch = Z_collab[items_for_re]
+
+        # Normalize
+        f_batch_norm = F.normalize(f_batch, p=2, dim=1)
+        z_batch_norm = F.normalize(z_batch, p=2, dim=1)
+
+        # Compute structural positive mask
+        batch_size_re = z_batch.size(0)
+
+        if batch_size_re <= 512:
+            # Small batch: compute directly
+            sim_zz = torch.matmul(z_batch_norm, z_batch_norm.T)
+            pos_mask = (sim_zz > self.structural_threshold).float()
+            pos_mask.fill_diagonal_(1)
+        else:
+            # Large batch: use chunked computation
+            chunk_size = 256
+            pos_mask = torch.zeros(batch_size_re, batch_size_re).cuda()
+
+            for i in range(0, batch_size_re, chunk_size):
+                end_i = min(i + chunk_size, batch_size_re)
+                sim_chunk = torch.mm(z_batch_norm[i:end_i], z_batch_norm.t())
+                pos_mask[i:end_i] = (sim_chunk > self.structural_threshold).float()
+
+            pos_mask.fill_diagonal_(1)
+
+        # Compute L_RE
+        loss_re = self.lambda_re * calc_infonce_with_mask(
+            f_batch_norm, z_batch_norm, pos_mask, self.temperature_re
+        )
+
+        # --- 4. Regularization Loss ---
+        # L2 regularization on LightGCN embeddings and encoder parameters
+        reg_loss = self.reg_weight * self.lightgcn.embedding.weight.norm(2).pow(2)
+
+        # Add encoder regularization
+        for param in self.encoder_layer1.parameters():
+            reg_loss += self.reg_weight * param.norm(2).pow(2)
+        for param in self.encoder_layer2.parameters():
+            reg_loss += self.reg_weight * param.norm(2).pow(2)
+
+        reg_loss = reg_loss / batch_size
+
+        # --- 5. Total Loss ---
+        total_loss = loss_ui + loss_re + reg_loss
+
+        return total_loss, loss_ui, loss_re, reg_loss
